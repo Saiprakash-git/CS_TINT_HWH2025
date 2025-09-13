@@ -1,0 +1,116 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+from urllib.parse import urlparse
+import validators
+import requests
+
+# Load dataset
+df = pd.read_csv('/content/malicious_phish.csv', on_bad_lines='skip')
+
+# --- Preprocessing ---
+def simple_preprocess(url):
+    if pd.isna(url):
+        return ""
+    url = url.replace('https://', '').replace('http://', '').replace('www.', '')
+    return url.lower().strip()
+
+df['clean_url'] = df['url'].apply(simple_preprocess)
+
+# --- Handcrafted features ---
+def extract_simple_features(url):
+    features = {}
+    features['length'] = len(url)
+    features['num_dots'] = url.count('.')
+    features['num_slashes'] = url.count('/')
+    features['num_digits'] = sum(c.isdigit() for c in url)
+    features['has_https'] = 1 if 'https' in url else 0
+    return features
+
+features_list = [extract_simple_features(u) for u in df['clean_url']]
+features_df = pd.DataFrame(features_list)
+df = pd.concat([df, features_df], axis=1)
+
+# --- Train/test split ---
+X = df['clean_url']
+y = df['type']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# --- TF-IDF Vectorizer ---
+vectorizer = TfidfVectorizer(
+    max_features=500,
+    ngram_range=(1, 2)
+)
+X_train_vec = vectorizer.fit_transform(X_train)
+X_test_vec = vectorizer.transform(X_test)
+
+# --- Classifier ---
+clf = RandomForestClassifier(n_estimators=50, random_state=42)
+clf.fit(X_train_vec, y_train)
+
+# --- Evaluation ---
+y_pred = clf.predict(X_test_vec)
+print("Accuracy:", (y_pred == y_test).mean())
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred))
+
+# --- Extra checks ---
+def is_valid_url(url):
+    """Check if URL is syntactically valid."""
+    return validators.url(url)
+
+def url_is_reachable(url, timeout=5):
+    """Check if URL responds to a HEAD request."""
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=timeout)
+        return response.status_code == 200
+    except:
+        return False
+
+# --- Final prediction function ---
+def predict_url(url):
+    result = {
+        'url': url,
+        'is_valid': is_valid_url(url),
+        'is_reachable': None,
+        'prediction': None,
+        'confidence': None
+    }
+
+    # Check reachability only if URL is valid
+    if result['is_valid']:
+        result['is_reachable'] = url_is_reachable(url)
+
+        # ML model only needs the cleaned URL
+        clean_url = simple_preprocess(url)
+        url_vec = vectorizer.transform([clean_url])
+
+        prediction = clf.predict(url_vec)[0]
+        probability = clf.predict_proba(url_vec)[0]
+
+        result['prediction'] = prediction
+        result['confidence'] = max(probability)
+
+    return result
+
+# --- Test URLs ---
+test_urls = [
+    "https://www.paypal.com/login",       # likely phishing
+    "http://br-icloud.com.br",            # malicious
+    "https://en.wikipedia.org/wiki/Main_Page",  # benign
+    "htp:/wrong-url.com"                  # invalid
+]
+
+for url in test_urls:
+    res = predict_url(url)
+    print("\nURL:", res['url'])
+    print("Valid:", res['is_valid'])
+    print("Reachable:", res['is_reachable'])
+    print("Prediction:", res['prediction'])
+    print(f"Confidence: {res['confidence']:.2f}" if res['confidence'] else "Confidence: N/A")
